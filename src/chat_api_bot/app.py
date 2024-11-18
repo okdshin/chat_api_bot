@@ -96,6 +96,11 @@ cli_parser.add_argument(
     metavar='KEY=VALUE',
     default=[],
     help="-")
+cli_parser.add_argument(
+    '--typing-emoji',
+    default=":keyboard:",
+    type=str,
+    help="-")
 cli_args = cli_parser.parse_args()
 
 
@@ -132,7 +137,7 @@ def reply_streaming_message(message_iterator, event):
     message_buffer = []
     message_buffer.append(message_iterator.__next__())
     initial_post_result = app.client.chat_postMessage(
-        text="".join(message_buffer)+":keyboard:",
+        text="".join(message_buffer)+cli_args.typing_emoji,
         thread_ts=event["ts"],
         channel=event["channel"],
         reply_broadcast=True,
@@ -142,7 +147,7 @@ def reply_streaming_message(message_iterator, event):
         message_buffer.append(partial_message)
         if time.perf_counter() - last_update > 1.0:
             app.client.chat_update(
-                text="".join(message_buffer)+":keyboard:",
+                text="".join(message_buffer)+cli_args.typing_emoji,
                 ts=initial_post_result["ts"],
                 channel=event["channel"],
             )
