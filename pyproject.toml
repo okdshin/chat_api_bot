@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chat_api_bot"
+version = "0.0.1"
+authors = [
+  { name="okdshin", email="kokuzen@gmail.com" },
+]
+description = "chat api slack bot script"
+readme = "README.md"
+requires-python = ">=3.11"
