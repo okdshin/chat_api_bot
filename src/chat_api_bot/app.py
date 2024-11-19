@@ -11,7 +11,8 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
 from slack_sdk.http_retry import all_builtin_retry_handlers
 
-from sqlalchemy import create_engine, Column, Float, String
+from sqlalchemy.sql import exists
+from sqlalchemy import create_engine, Integer, Column, Float, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -29,6 +30,8 @@ class ChatCompletionsOptions:
     temperature: float = 1.0  # OpenAI API default
     top_p: float = 1.0  # OpenAI API default
 
+    broadcast_reply: int = 1
+
 
 Base = declarative_base()
 
@@ -43,6 +46,8 @@ for field in fields(ChatCompletionsOptions):
         column_type = String
     elif field.type == float:
         column_type = Float
+    elif field.type == int:
+        column_type = Integer
     else:
         raise NotImplementedError
     setattr(
@@ -62,7 +67,12 @@ def setup_chat_completions_options_parser(parser, channel_defaults=None, cli_def
         app_default = field.default if field.default is not dataclasses.MISSING else None
         if channel_defaults is not None:
             assert cli_defaults is not None
-            default = getattr(channel_defaults, field.name) or getattr(cli_defaults, field.name) or app_default
+            if getattr(channel_defaults, field.name) is not None:
+                default = getattr(channel_defaults, field.name)
+            elif getattr(cli_defaults, field.name) is not None:
+                default = getattr(cli_defaults, field.name)
+            else:
+                default = app_default
         else:
             default = app_default
         parser.add_argument(
@@ -133,14 +143,14 @@ def reply_message(message, event, reply_broadcast=True):
     )
 
 
-def reply_streaming_message(message_iterator, event):
+def reply_streaming_message(message_iterator, event, reply_broadcast=True):
     message_buffer = []
     message_buffer.append(message_iterator.__next__())
     initial_post_result = app.client.chat_postMessage(
         text="".join(message_buffer)+cli_args.typing_emoji,
         thread_ts=event["ts"],
         channel=event["channel"],
-        reply_broadcast=True,
+        reply_broadcast=reply_broadcast,
     )
     last_update = time.perf_counter()
     for partial_message in message_iterator:
@@ -169,27 +179,29 @@ def app_mention(event, say):
     )
     Session = sessionmaker(bind=engine)
     session = Session()
+    o = session.query(ChannelChatCompletionsOptions).filter(ChannelChatCompletionsOptions.channel==event["channel"]).first()
     channel_defaults = (
-        session.query(ChannelChatCompletionsOptions).filter(ChannelChatCompletionsOptions.channel==event["channel"]).first() 
-        or ChannelChatCompletionsOptions()
+        o or ChannelChatCompletionsOptions()
     )
+    print("Channel defaults!", channel_defaults)
+    parser.add_argument("content", type=str, nargs="?", default="", help="-")
     setup_chat_completions_options_parser(
         parser=parser,
         channel_defaults=channel_defaults,
         cli_defaults=cli_args,
     )
-    parser.add_argument("--content", type=str, help="-")
     parser.add_argument("--set-as-channel-defaults", action="store_true", help="-")
     try:
-        args, rest = parser.parse_known_args(shlex.split(event["text"])[1:])
-        if args.content is None and rest:
-            args.content = event["text"][len(shlex.split(event["text"])[0]+" "):]
-        elif args.content is None and not rest and not args.set_as_channel_defaults:
+        args = parser.parse_args(shlex.split(event["text"])[1:])
+        print(args)
+        if args.content == "" and not args.set_as_channel_defaults:
             reply_message(message=parser.format_help(), event=event, reply_broadcast=False)
             return
-        assert args.content is not None
+        else:
+            args.content = event["text"][len(shlex.split(event["text"])[0]+" "):]
+        args.base_url = args.base_url.lstrip("<").rstrip(">")
     except (argparse.ArgumentError, argparse.ArgumentTypeError) as e:
-        reply_message(message=str(e), event=event, reply_broadcast=False)
+        reply_message(message=e, event=event, reply_broadcast=False)
         return
 
     if args.set_as_channel_defaults:
@@ -199,16 +211,16 @@ def app_mention(event, say):
         }
         Session = sessionmaker(bind=engine)
         session = Session()
-        channel_defaults = session.query(ChannelChatCompletionsOptions).filter(ChannelChatCompletionsOptions.channel==event["channel"])
-        if channel_defaults is None:
+        if session.query(exists().where(ChannelChatCompletionsOptions.channel==event["channel"])).scalar():
+            channel_defaults = session.query(ChannelChatCompletionsOptions).filter(ChannelChatCompletionsOptions.channel==event["channel"]).first()
+            for key, value in new_channel_defaults_dict.items():
+                setattr(channel_defaults, key, value)
+        else:
             new_channel_defaults = ChannelChatCompletionsOptions(
                 **new_channel_defaults_dict,
                 channel=event["channel"],
             )
             session.add(new_channel_defaults)
-        else:
-            for key, value in new_channel_defaults_dict.items():
-                setattr(channel_defaults, key, value)
         session.commit()
         reply_message(message=f"{new_channel_defaults_dict}", event=event)
         return
@@ -243,9 +255,11 @@ def app_mention(event, say):
             #message_iterator=dummy_text_iterator(f"hello {args}"),
             message_iterator=streaming_response(),
             event=event,
+            reply_broadcast=args.broadcast_reply,
         )
     except Exception as e:
-        reply_message(message=f"{str(e)}", event=event, reply_broadcast=False)
+        print(e)
+        reply_message(message=f"{repr(e)}", event=event, reply_broadcast=False)
 
 
 if __name__ == "__main__":
